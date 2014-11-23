@@ -40,7 +40,7 @@ class THasher {
 						///////////////////////////////////////
 						if ($this->pathexcept && $this->pathexcept->CheckException($dir.'/'.$file)){
 							
-							$this->file_list[]=array('file_hash' => hash_file('crc32',$initial_dir.$dir.'/'.$file),
+							$this->file_list[]=array('file_hash' => hash_file(HASH_TYPE, $initial_dir.$dir.'/'.$file),
 								'file_size' => filesize($initial_dir.$dir.'/'.$file),
 								'file_path' => $this->encoding->DetectEnc($dir.'/'.$file),
 								'file_type' => GetFileType($file)
@@ -129,12 +129,10 @@ class THasherStorage {
 	}
 
 	function InitStorage (){
-	    //проверить существуют ли таблицы если их нет, то необходимо создать
 	    $this->CheckDirs();
+	    //проверить существуют ли таблицы если их нет, то необходимо создать
 	    if ($this->CheckTables()) {
-
 		if ($this->watermarker->updated) $this->MoveFromOriginal();
-    
 		$this->RotateTables();
 	    }
 	}
@@ -159,7 +157,12 @@ class THasherStorage {
                 if ($state->rowCount()==0){
                         if (!$this->sqlconn->query(str_replace('%table%', NEW_TABLE, TPL_TABLE))) $result=FALSE;
                 }
-                
+
+		$state=$this->sqlconn->query('SHOW TABLES FROM `'.MYSQL_DB.'` WHERE `Tables_in_'.MYSQL_DB.'`=\''.ORIGINALS_TABLE.'\'');
+		if ($state->rowCount()==0){
+			if (!$this->sqlconn->query(str_replace('%table%', ORIGINALS_TABLE, TPL_TABLE_ORIGINALS))) $result=FALSE;
+		}
+
                 return $result;
         }
 
@@ -179,7 +182,7 @@ class THasherStorage {
 	}
 
 	function Insert ($files_array) {
-		$sql='INSERT INTO `'.NEW_TABLE.'` (file_path, file_hash, orig_hash, file_type, file_size) VALUES ( :file_path, :file_hash, :file_hash, :file_type, :file_size)';
+		$sql='INSERT INTO `'.NEW_TABLE.'` (file_path, file_hash, file_type, file_size) VALUES ( :file_path, :file_hash, :file_type, :file_size)';
 		$state=$this->sqlconn->prepare($sql);
 		if ($state) {
 		    foreach ($files_array as $a_file){
@@ -196,19 +199,7 @@ class THasherStorage {
 	function ProcessNewChanged(){
 	    $this->Log('DEBUG','----- Start processing new and changed files -----');
 
-	    //NEW
-	    //SELECT * FROM `watermark_main` RIGHT JOIN `watermark_new` 
-	    //ON `watermark_main`.`file_hash`=`watermark_new`.`file_hash` 
-	    //WHERE `watermark_main`.`file_hash` IS NULL
-
-	    $sql='
-		    SELECT `watermark_new`.`file_hash`, `watermark_new`.`file_path`, `watermark_new`.`file_type` 
-		    FROM `watermark_main` RIGHT JOIN `watermark_new`
-		    ON `watermark_main`.`file_hash`=`watermark_new`.`file_hash`
-		    WHERE `watermark_main`.`file_hash` IS NULL
-	    ';
-
-	    $state=$this->sqlconn->query($sql);
+	    $state=$this->sqlconn->query(TPL_SQL_NEW);
 	    if ($state && $state->rowCount()!=0){
 		$this->file_info=$state->fetch();
 		while ($this->file_info){
@@ -217,14 +208,7 @@ class THasherStorage {
 		}
 	    }
 
-	    $sql='
-		SELECT `watermark_new`.`file_hash`, `watermark_new`.`file_path`, `watermark_new`.`file_type` 
-		FROM `watermark_new` INNER JOIN `watermark_main` 
-		ON `watermark_new`.`file_path`=`watermark_main`.`file_path`
-		WHERE `watermark_new`.`file_hash` <> `watermark_main`.`file_hash`
-	    ';
-
-	    $state=$this->sqlconn->query($sql);
+	    $state=$this->sqlconn->query(TPL_SQL_CHANGED);
 	    if ($state && $state->rowCount()!=0){
 		$this->file_info=$state->fetch();
 		while ($this->file_info) {
@@ -250,6 +234,18 @@ class THasherStorage {
 	    $orig_file=ORIGINALS_DIR.'/'.$this->file_info['file_hash'].'.'.$this->file_info['file_type'];
 	    if (copy(IMAGE_DIR.$this->file_info['file_path'], $orig_file)){
 		$this->Log('NOTICE', 'Original file '.$this->file_info['file_path'].' stored in '.$orig_file);
+		$sql='
+		    INSERT INTO `'.ORIGINALS_TABLE.'` (`original_hash`, `original_type`, `file_path`, `file_size`) VALUES ( :original_hash, :original_type, :file_path, :file_size );
+		';
+		$state=$this->sqlconn->prepare($sql);
+		if ($state){
+		    $state->bindValue(':original_hash', $this->file_info['file_hash']);
+		    $state->bindValue(':original_type', $this->file_info['file_type']);
+		    $state->bindValue(':file_path', $this->file_info['file_path']);
+		    $state->bindValue(':file_size', $this->file_info['file_size']);
+		    $state->execute();
+		}
+		
 		$result=TRUE;
 	    }
 	    return $result;
@@ -258,11 +254,11 @@ class THasherStorage {
 	function UpdateHash(){
 	    $this->Log('DEBUG', '---- Update hash after watermark file ----');
 	    $sql='
-		UPDATE `watermark_new` SET `file_hash`= :new_hash WHERE `file_hash`= :old_hash
+		UPDATE `'.NEW_TABLE.'` SET `file_hash`= :new_hash WHERE `file_hash`= :old_hash
 	    ';
 	    $state=$this->sqlconn->prepare($sql);
 	    if ($state) {
-		$state->bindValue(':new_hash', hash_file('crc32', IMAGE_DIR.$this->file_info['file_path']));
+		$state->bindValue(':new_hash', hash_file(HASH_TYPE, IMAGE_DIR.$this->file_info['file_path']));
 		$state->bindValue(':old_hash', $this->file_info['file_hash']);
 		$state->execute();
 	    }
@@ -271,15 +267,15 @@ class THasherStorage {
 	function MoveFromOriginal(){
 	    $this->Log('DEBUG', '----- Watermark was changed and we must make update files ----');
 	    $sql='
-		SELECT `file_hash`, `file_type`, `file_path` FROM `watermark_new`
+		SELECT `orig_hash`, `file_type`, `file_path` FROM `'.NEW_TABLE.'`
 	    ';
 	    $state=$this->sqlconn->query($sql);
 	    if ($state){
 		$this->file_info=$state->fetch();
 		while ($this->file_info){
-		    $orig_file=ORIGINALS_DIR.'/'.$this->file_info['file_hash'].'.'.$this->file_info['file_type'];
-		
-		    if (is_file($orig_file) && rename(IMAGE_DIR.$this->file_info['file_path'])) {
+		    $orig_file=ORIGINALS_DIR.'/'.$this->file_info['orig_hash'].'.'.$this->file_info['file_type'];
+		    $this->Log('DEBUG', 'original file is - '.$orig_file);
+		    if (is_file($orig_file) && rename($orig_file, IMAGE_DIR.$this->file_info['file_path'])) {
 			$this->Log('NOTICE', 'Original file was moved to '.IMAGE_DIR.$this->file_info['file_path']);
 		    }
 		    $this->file_info=$state->fetch();
@@ -287,7 +283,7 @@ class THasherStorage {
 	    }
 	    
 	    $this->watermarker->SetHashWatermark();
-	    
+
 	}
 
 }

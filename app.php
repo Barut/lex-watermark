@@ -6,6 +6,7 @@ require_once dirname(__FILE__).'/lib/watermark.inc.php';
 require_once dirname(__FILE__).'/lib/hasher.inc.php';
 require_once dirname(__FILE__).'/lib/mod_pdo.inc.php';
 require_once dirname(__FILE__).'/lib/loger.inc.php';
+require_once dirname(__FILE__).'/const.inc.php';
 require_once dirname(__FILE__).'/conf.inc.php';
 
 
