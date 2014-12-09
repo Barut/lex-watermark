@@ -1,70 +1,232 @@
 <?php
 
+define ('MAX_INPUT', 50);
+define ('HASH_TYPE', 'crc32');
+define ('NEW_TABLE', 'watermark_new');
+define ('MAIN_TABLE', 'watermark_main');
+
+define('TPL_TABLE', '
+                CREATE TABLE IF NOT EXISTS `%table%` (
+                `file_hash` varchar(8) NOT NULL,
+                `file_path` varchar(300) BINARY NOT NULL,
+                `file_size` int(11) NOT NULL,
+                KEY `file_path` (`file_path`),
+		KEY `file_hash` (`file_hash`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE utf8_bin;
+');
+
+
+define('TPL_SQL_NEW','
+                SELECT `watermark_new`.`file_path` 
+                FROM `watermark_main` RIGHT JOIN `watermark_new`
+                ON `watermark_main`.`file_path`=`watermark_new`.`file_path`
+                WHERE `watermark_main`.`file_path` IS NULL
+');
+
+define('TPL_SQL_CHANGED','
+            SELECT `watermark_new`.`file_path` 
+            FROM `watermark_new` INNER JOIN `watermark_main` 
+            ON `watermark_new`.`file_path`=`watermark_main`.`file_path`
+            WHERE `watermark_new`.`file_hash` <> `watermark_main`.`file_hash`
+');
+
+define('TPL_SQL_DELETED','
+	    SELECT `watermark_main`.`file_path` 
+	    FROM `watermark_main` LEFT JOIN `watermark_new`
+	    ON `watermark_main`.`file_path`=`watermark_new`.`file_path`
+	    WHERE `watermark_new`.`file_path` IS NULL
+');
+
+
+
 class THasher {
+
 	
 	public $parent; //parent -> TApp
 	
-	private $loger; // TLoger
+	protected $loger; // TLoger
 
 	private $pathexcept; // THasherExceptions
 
-	private $storage; // THasherStorage
-	
-	private $file_list = array();
-	
+	private $initial_dir; 
+
+	// created inside class
+	    
 	private $encoding; //TEncodings
+
+	private $file_list = array();
 	
 	/////////////////////////////////////////////////////////////////////
 	function THasher($parent) {
-		$this->parent= (!empty($parent) ?  $parent : FALSE);
-		$this->loger = (!empty($parent->loger) ? $parent->loger : FALSE);
-		$this->pathexcept = (!empty($parent->pathexcept) ? $parent->pathexcept : FALSE);
-		$this->storage = (!empty($parent->storage) ? $parent->storage : FALSE);
-		$this->encoding = (!empty($parent->encoding) ? $parent->encoding : FALSE);
+	    $this->parent= (!empty($parent) ?  $parent : FALSE);
+	    $this->loger = (!empty($parent->loger) ? $parent->loger : FALSE);
+	    $this->sqlconn = (!empty($parent->sqlconn) ? $parent->sqlconn : FALSE);
+
+	    $this->encoding = new TEncodings($this);
+
+	    if ($this->CheckAndCreateTables()){
+		$this->RotateTables();
+	    }
 	}
 	
 	function Log ($type, $message) {
-		if ($this->loger) $this->loger->Write($this, $type, $message);
+	    if ($this->loger) $this->loger->Write($this, $type, $message);
 	}
 
 	/////////////////////////////////////////////////////////////////////
-	function ScanDir($initial_dir, $dir=''){
-		$dh = opendir($initial_dir.$dir);
-		if ($dh){
-			$file = readdir($dh);
-			while ($file){
-				if (($file != '.') && ($file != '..')){
-					if (is_dir($initial_dir.$dir.'/'.$file) && !is_link($initial_dir.$dir.'/'.$file)) {
-						$this->ScanDir($initial_dir, $dir.'/'.$file);
-					} else {
-						///////////////////////////////////////
-						if ($this->pathexcept && $this->pathexcept->CheckException($dir.'/'.$file)){
-							
-							$this->file_list[]=array('file_hash' => hash_file(HASH_TYPE, $initial_dir.$dir.'/'.$file),
-								'file_size' => filesize($initial_dir.$dir.'/'.$file),
-								'file_path' => $this->encoding->DetectEnc($dir.'/'.$file),
-								'file_type' => GetFileType($file)
+	function ScanDir($dir=''){
+	    $dh = opendir($this->initial_dir.$dir);
+	    if ($dh){
+		$file = readdir($dh);
+		while ($file){
+		    if (($file != '.') && ($file != '..')){
+			if (is_dir($this->initial_dir.$dir.'/'.$file) && !is_link($this->initial_dir.$dir.'/'.$file)) {
+			    $this->ScanDir($dir.'/'.$file);
+			} else {
+			///////////////////////////////////////
+			    if ($this->pathexcept && $this->pathexcept->CheckException($dir.'/'.$file)){			
+				$this->file_list[]=array('file_hash' => hash_file(HASH_TYPE, $this->initial_dir.$dir.'/'.$file),
+							'file_size' => filesize($this->initial_dir.$dir.'/'.$file),
+							'file_path' => $this->encoding->DetectEnc($dir.'/'.$file)
 							);
 							
-						}
-						///////////////////////////////////////
-						if (count($this->file_list) >= MAX_INPUT){
-							if ($this->storage) $this->storage->Insert($this->file_list);
-							$this->file_list=array();
-						}
-					}
-				}
+			    }
+			///////////////////////////////////////
+			    if (count($this->file_list) >= MAX_INPUT){
+				    $this->ProcessFiles();
+				    $this->file_list=array();
+			    }
+			}
+		    }
 		
-				$file = readdir($dh);
-			}
-			if (count($this->file_list) !=0){
-				if ($this->storage) $this->storage->Insert($this->file_list);
-				$this->file_list=array();
-			}
-			closedir($dh);
+		    $file = readdir($dh);
 		}
+		
+		if (count($this->file_list) !=0){
+		    $this->ProcessFiles();
+		    $this->file_list=array();
+		}
+		
+		closedir($dh);
+	    
+	    } else {
+		$this->Log('ERROR', 'can\'t get dir handel');
+	    }
 	}
+
+	function SetInitialDir($directory){
+	    $this->initial_dir = $directory;
+	}
+
+	function AssignExceptions(THasherExceptions $exceptions){
+	    $this->pathexcept = (!empty($exceptions) ? $exceptions : FALSE);
+	}
+
 	////////////////////////////////////////////////////////////////////////
+	function ProcessFiles(){
+	    $sql='INSERT INTO `'.NEW_TABLE.'` (file_path, file_hash, file_size) 
+    				    VALUES ( :file_path, :file_hash, :file_size)';
+    	    $state=$this->sqlconn->prepare($sql);
+    	    if ($state) {
+        	foreach ($this->file_list as $a_file){
+        	    $state->bindValue(':file_path', $a_file['file_path']);
+        	    $state->bindValue(':file_hash', $a_file['file_hash']);
+        	    $state->bindValue(':file_size', $a_file['file_size']);
+        	    $state->execute();
+        	}
+    	    }
+
+	}
+
+	function CheckAndCreateTables(){
+	    $result=TRUE;
+    	    $state=$this->sqlconn->query('SHOW TABLES FROM `'.MYSQL_DB.'` WHERE `Tables_in_'.MYSQL_DB.'`=\''.MAIN_TABLE.'\'');
+    	    if ($state->rowCount()==0){
+        	if (!$this->sqlconn->query(str_replace('%table%', MAIN_TABLE, TPL_TABLE))) $result=FALSE;
+    	    }
+        
+    	    $state=$this->sqlconn->query('SHOW TABLES FROM `'.MYSQL_DB.'` WHERE `Tables_in_'.MYSQL_DB.'`=\''.NEW_TABLE.'\'');
+    	    if ($state->rowCount()==0){
+        	if (!$this->sqlconn->query(str_replace('%table%', NEW_TABLE, TPL_TABLE))) $result=FALSE;
+    	    }
+        
+    	    return $result;
+	}
+
+	function RotateTables(){
+        //совершить ротацию таблиц
+    	    $state=$this->sqlconn->query('SELECT COUNT(*) FROM `'.NEW_TABLE.'`');
+    	    $res = $state->fetch();
+    	    if ($res && $res[0]!=0) {
+
+		$state=$this->sqlconn->query('TRUNCATE TABLE `'.MAIN_TABLE.'`');
+		if ($state) {
+		    $state->closeCursor();
+		}
+
+        	$state=$this->sqlconn->query('INSERT INTO `'.MAIN_TABLE.'` SELECT * FROM `'.NEW_TABLE.'`');
+		if ($state) {
+		    $state->closeCursor();
+		}
+
+        	$state=$this->sqlconn->query('TRUNCATE TABLE `'.NEW_TABLE.'`');
+		if ($state) {
+		    $state->closeCursor();
+		}
+
+    	    } else {
+		$this->Log('NOTICE', 'Nothing rotate. Table - '.NEW_TABLE.' clear');
+	    }
+	}
+
+
+	function GetNew(){
+	    $result = FALSE;
+            $state = $this->sqlconn->query(TPL_SQL_NEW);
+	    if ($state && $state->rowCount()!=0){
+    		$result = $state;
+    	    }
+	    return $result;
+	}
+
+	function GetModified(){
+    	    $result = FALSE;
+	    $state=$this->sqlconn->query(TPL_SQL_CHANGED);
+    	    if ($state && $state->rowCount()!=0){
+        	$result = $state;
+    	    }
+	    return $result;
+	}
+
+	function GetDeleted(){
+	    $result = FALSE;
+	    $state=$this->sqlconn->query(TPL_SQL_DELETED);
+    	    if ($state && $state->rowCount()!=0){
+        	$result = $state;
+    	    }
+	    return $result;
+	}
+
+	private function UpdateFileHash ($file, $hash, $table){
+	    $sql = 'UPDATE `'.$table.'` SET file_hash=:file_hash WHERE file_path=:file_path';
+	    $state=$this->sqlconn->prepare($sql);
+	    $state->bindValue(':file_hash', $hash);
+	    $state->bindValue(':file_path', $file);
+	    return ($state->execute() ? TRUE : FALSE); 
+	}
+
+	public function UpdateMainFileHash ($file){
+	    $this->UpdateFileHash($file, 
+				hash_file(HASH_TYPE, $this->initial_dir.'/'.$file), 
+				MAIN_TABLE);
+	}
+
+	public function UpdateNewFileHash ($file){
+	    $this->UpdateFileHash($file, 
+				hash_file(HASH_TYPE, $this->initial_dir.'/'.$file), 
+				NEW_TABLE);
+	}
+
 }
 
 
@@ -98,195 +260,5 @@ class THasherExceptions {
 	}
 
 }
-
-
-class THasherStorage {
-
-	public $parent;
-
-	private $loger;
-
-	private $sqlconn;
-	
-	private $watermarker;
-
-
-    
-	private $file_info = array();
-
-
-	function __construct ($parent){
-		$this->parent = (!empty($parent) ? $parent : FALSE);
-		$this->loger = (!empty($parent->loger) ? $parent->loger : FALSE);
-		$this->sqlconn = (!empty($parent->sqlconn) ? $parent->sqlconn : FALSE);
-		$this->watermarker = (!empty($parent->watermarker) ? $parent->watermarker : FALSE);
-
-		$this->InitStorage();
-	}
-
-	function Log ($type, $message){
-		if ($this->loger) $this->loger->Write($this, $type, $message);
-	}
-
-	function InitStorage (){
-	    $this->CheckDirs();
-	    //проверить существуют ли таблицы если их нет, то необходимо создать
-	    if ($this->CheckTables()) {
-		if ($this->watermarker->updated) $this->MoveFromOriginal();
-		$this->RotateTables();
-	    }
-	}
-
-	function CheckDirs(){
-	    if (!is_dir(IMAGE_DIR)){
-		$this->Log('ERROR', '!!! Images dir does not exists !!!');
-	    }
-	    if (!is_dir(ORIGINALS_DIR)) mkdir(ORIGINALS_DIR);
-
-	}
-
-
-	function CheckTables(){
-                $result=TRUE;
-                $state=$this->sqlconn->query('SHOW TABLES FROM `'.MYSQL_DB.'` WHERE `Tables_in_'.MYSQL_DB.'`=\''.MAIN_TABLE.'\'');
-                if ($state->rowCount()==0){
-                        if (!$this->sqlconn->query(str_replace('%table%', MAIN_TABLE, TPL_TABLE))) $result=FALSE;
-                }
-                
-                $state=$this->sqlconn->query('SHOW TABLES FROM `'.MYSQL_DB.'` WHERE `Tables_in_'.MYSQL_DB.'`=\''.NEW_TABLE.'\'');
-                if ($state->rowCount()==0){
-                        if (!$this->sqlconn->query(str_replace('%table%', NEW_TABLE, TPL_TABLE))) $result=FALSE;
-                }
-
-		$state=$this->sqlconn->query('SHOW TABLES FROM `'.MYSQL_DB.'` WHERE `Tables_in_'.MYSQL_DB.'`=\''.ORIGINALS_TABLE.'\'');
-		if ($state->rowCount()==0){
-			if (!$this->sqlconn->query(str_replace('%table%', ORIGINALS_TABLE, TPL_TABLE_ORIGINALS))) $result=FALSE;
-		}
-
-                return $result;
-        }
-
-	
-	function RotateTables(){
-	    //совершить ротацию таблиц
-		$state=$this->sqlconn->query('SELECT COUNT(*) FROM `'.NEW_TABLE.'`');
-		$res=$state->fetch();
-		if ($res && $res[0]!==0) {
-		    $state=$this->sqlconn->query('TRUNCATE TABLE `'.MAIN_TABLE.'`');
-            
-		    $state=$this->sqlconn->query('INSERT INTO `'.MAIN_TABLE.'` SELECT * FROM `'.NEW_TABLE.'`');
-
-		    $state=$this->sqlconn->query('TRUNCATE TABLE `'.NEW_TABLE.'`');
-		}
-
-	}
-
-	function Insert ($files_array) {
-		$sql='INSERT INTO `'.NEW_TABLE.'` (file_path, file_hash, file_type, file_size) VALUES ( :file_path, :file_hash, :file_type, :file_size)';
-		$state=$this->sqlconn->prepare($sql);
-		if ($state) {
-		    foreach ($files_array as $a_file){
-			//$this->Log('DEBUG', '---- file '.$a_file['file_path']);
-			$state->bindValue(':file_path', $a_file['file_path']);
-			$state->bindValue(':file_hash', $a_file['file_hash']);
-			$state->bindValue(':file_type', $a_file['file_type']);
-			$state->bindValue(':file_size', $a_file['file_size']);
-			$state->execute();
-		    }
-		}
-	}
-
-	function ProcessNewChanged(){
-	    $this->Log('DEBUG','----- Start processing new and changed files -----');
-
-	    $state=$this->sqlconn->query(TPL_SQL_NEW);
-	    if ($state && $state->rowCount()!=0){
-		$this->file_info=$state->fetch();
-		while ($this->file_info){
-		    $this->ProcessFile();
-		    $this->file_info=$state->fetch();
-		}
-	    }
-
-	    $state=$this->sqlconn->query(TPL_SQL_CHANGED);
-	    if ($state && $state->rowCount()!=0){
-		$this->file_info=$state->fetch();
-		while ($this->file_info) {
-		    $this->ProcessFile();
-		    $this->file_info=$state->fetch();
-		}
-	    }
-
-	}
-
-
-	function ProcessFile(){
-	    $this->Log('DEBUG', '----- Process file -----');
-	    if ($this->CopyOriginal()){
-		$this->watermarker->MakeWatermark($this->file_info);
-		$this->UpdateHash();
-	    }
-	}
-
-	function CopyOriginal(){
-	    $result=FALSE;
-	    $this->Log('DEBUG', '---- Copy original file to ORGINALS dir -----');
-	    $orig_file=ORIGINALS_DIR.'/'.$this->file_info['file_hash'].'.'.$this->file_info['file_type'];
-	    if (copy(IMAGE_DIR.$this->file_info['file_path'], $orig_file)){
-		$this->Log('NOTICE', 'Original file '.$this->file_info['file_path'].' stored in '.$orig_file);
-		$sql='
-		    INSERT INTO `'.ORIGINALS_TABLE.'` (`original_hash`, `original_type`, `file_path`, `file_size`) VALUES ( :original_hash, :original_type, :file_path, :file_size );
-		';
-		$state=$this->sqlconn->prepare($sql);
-		if ($state){
-		    $state->bindValue(':original_hash', $this->file_info['file_hash']);
-		    $state->bindValue(':original_type', $this->file_info['file_type']);
-		    $state->bindValue(':file_path', $this->file_info['file_path']);
-		    $state->bindValue(':file_size', $this->file_info['file_size']);
-		    $state->execute();
-		}
-		
-		$result=TRUE;
-	    }
-	    return $result;
-	}
-
-	function UpdateHash(){
-	    $this->Log('DEBUG', '---- Update hash after watermark file ----');
-	    $sql='
-		UPDATE `'.NEW_TABLE.'` SET `file_hash`= :new_hash WHERE `file_hash`= :old_hash
-	    ';
-	    $state=$this->sqlconn->prepare($sql);
-	    if ($state) {
-		$state->bindValue(':new_hash', hash_file(HASH_TYPE, IMAGE_DIR.$this->file_info['file_path']));
-		$state->bindValue(':old_hash', $this->file_info['file_hash']);
-		$state->execute();
-	    }
-	}
-
-	function MoveFromOriginal(){
-	    $this->Log('DEBUG', '----- Watermark was changed and we must make update files ----');
-	    $sql='
-		SELECT `orig_hash`, `file_type`, `file_path` FROM `'.NEW_TABLE.'`
-	    ';
-	    $state=$this->sqlconn->query($sql);
-	    if ($state){
-		$this->file_info=$state->fetch();
-		while ($this->file_info){
-		    $orig_file=ORIGINALS_DIR.'/'.$this->file_info['orig_hash'].'.'.$this->file_info['file_type'];
-		    $this->Log('DEBUG', 'original file is - '.$orig_file);
-		    if (is_file($orig_file) && rename($orig_file, IMAGE_DIR.$this->file_info['file_path'])) {
-			$this->Log('NOTICE', 'Original file was moved to '.IMAGE_DIR.$this->file_info['file_path']);
-		    }
-		    $this->file_info=$state->fetch();
-		}
-	    }
-	    
-	    $this->watermarker->SetHashWatermark();
-
-	}
-
-}
-
 
 ?>

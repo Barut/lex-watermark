@@ -1,8 +1,5 @@
 <?php
 
-
-
-
 class TEncodings {
 
 	public $parent;

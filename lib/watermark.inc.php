@@ -6,32 +6,57 @@ class TWatermarker {
 
     private $loger;
 
-    private $sqlconn;
-
-    public $updated = FALSE;    
-
-
-    private $watermark_image_hash;
-
 
 
     private $img_watermark;
 
     private $img_original;
 
+    private $img_result;
+
     private $orientation;
 
-    private $transparent=TRANSPARENT_LEVEL;
+    private $transparent;
+
 
     function __construct($parent){
 	$this->parent = (!empty($parent) ? $parent : FALSE);
 	$this->loger = (!empty($parent->loger) ? $parent->loger : FALSE);
-	$this->sqlconn = (!empty($parent->sqlconn) ? $parent->sqlconn : FALSE);
-	$this->CheckWatermark();
     }
 
     function Log($type, $message){
 	if ($this->loger) $this->loger->Write($this, $type, $message);
+    }
+
+    
+    function GetFileType($filename){
+	$result='';
+	$matches=array();
+	if (preg_match('/\.([a-zA-Z]+)$/', $filename, $matches)) $result=strtolower($matches[1]);
+	return $result;
+    }
+
+
+    function LoadWatermark ($filename){
+	$this->img_watermark = $this->GetImageByExtension($filename);
+    }
+
+    function LoadImage ($filename){
+	$this->img_original = $this->GetImageByExtension($filename);
+    }
+
+    function SetTransparentLevel($level){
+	$this->transparent = (!$level ? 100 : $level);
+    }
+
+    function SetOrientation($orientation){
+	$this->orientation=$orientation;
+    }
+
+    function SaveResult($filename){
+	if ($this->img_original){
+	    $this->SaveImageByExtension ($this->img_original, $filename);
+	}
     }
 
     /**
@@ -125,28 +150,9 @@ class TWatermarker {
     }
 
 
-    function CheckWatermark(){
-	$this->Log('DEBUG','----- Check Watermark -----');
-	if (is_file(WATERMARK_IMAGE)){
-	    $this->watermark_image_hash=hash_file('crc32', WATERMARK_IMAGE);
-	    if (is_file(WATERMARK_HASH)){
-		if ($this->watermark_image_hash!==file_get_contents(WATERMARK_HASH)) $this->updated=TRUE;
-	    } else {
-		$this->SetHashWatermark();
-	    }
-	} else {
-	    $this->Log('ERROR', 'Watermark image not found!!!');
-	    exit(1);
-	}
-    }
-
-    function SetHashWatermark(){
-	$this->Log('DEBUG', '----- Set Hash Watermark -----');
-	file_put_contents(WATERMARK_HASH, $this->watermark_image_hash);
-    }
-
-    function GetImageByExtension($filename, $type){
+    function GetImageByExtension($filename){
 	$result=FALSE;
+	$type = $this->GetFileType($filename);
 	switch ($type){
 	    case 'jpeg':
 		$result=imagecreatefromjpeg($filename);
@@ -164,64 +170,77 @@ class TWatermarker {
 	return $result;
     }
     
-    function SaveImageByExtension($image, $filename, $type){
-	$result=FALSE;
+    function SaveImageByExtension($image, $filename){
+	$result = FALSE;
+	$type = $this->GetFileType($filename);
 	switch ($type){
 	    case 'jpeg':
-		$result=imagejpeg($image, $filename);
+		$result = imagejpeg($image, $filename);
 		break;
 	    case 'jpg':
-		$result=imagejpeg($image, $filename);
+		$result = imagejpeg($image, $filename);
 		break;
 	    case 'png':
-		$result=imagepng($image, $filename);
+		$result = imagepng($image, $filename);
 		break;
 	    case 'gif':
-		$result=imagegif($image, $filename);
+		$result = imagegif($image, $filename);
 		$break;
 	}
 	return $result;
     }
 
-
-    function MakeWatermark($file_info){
-	$this->Log('DEBUG','----- Make watermark -----');
-	$this->img_watermark = $this->GetImageByExtension(WATERMARK_IMAGE, GetFileType(WATERMARK_IMAGE));
-	if ($wat_im) {
-	    $wat_im_wid = imagesx($wat_im);
-	    $wat_im_hei = imagesy($wat_im);
-
-	    $this->Log('DEBUG', 'Watermark width = '.$wat_im_wid);
-	    $this->Log('DEBUG', 'Watermark height = '.$wat_im_hei);
-	
-	
-	    $dest_im = $this->GetImageByExtension(IMAGE_DIR.$file_info['file_path'], $file_info['file_type']);
-	    if ($dest_im){
-		$dest_im_wid = imagesx($dest_im);
-		$dest_im_hei = imagesy($dest_im);
-
-		$this->Log('DEBUG', 'Original width = '.$dest_im_wid);
-		$this->Log('DEBUG', 'Original height = '.$dest_im_hei);
-
-		/*
-		imagecopy($dest_im, $wat_im,
-		    $wat_im_wid+10, 
-		    $wat_im_hei+10, 
-		    0,
-		    0,
-		    $wat_im_wid, 
-		    $wat_im_hei);
-		*/
-	    
-		$this->copyMerge();
-
-
-		$this->SaveImageByExtension($dest_im, IMAGE_DIR.$file_info['file_path'], $file_info['file_type']);
-	    }
-	} else {
-	    $this->Log('ERROR', '!!! Watermark image does not loaded !!!');
+    function WatermarkPosition (&$x, &$y){
+	switch ($this->orientation){
+	    case 'TOPLEFT':
+		    $x=0; $y=0;
+		    break;
+	    case 'TOPCENTER':
+		    $y=0;
+		    $x=round((imagesx($this->img_original) / 2) - (imagesx($this->img_watermark) / 2));
+		    break;
+	    case 'TOPRIGHT':
+		    $y=0;
+		    $x=round(imagesx($this->img_original) - imagesx($this->img_watermark));
+		    break;
+	    case 'CENTERLEFT':
+		    $x=0;
+		    $y=round((imagesy($this->img_original) / 2) - (imagesy($this->img_watermark) / 2));
+		    break;
+	    case 'CENTER':
+		    $x=round((imagesx($this->img_original) / 2) - (imagesx($this->img_watermark) / 2));
+		    $y=round((imagesy($this->img_original) / 2) - (imagesy($this->img_watermark) / 2));
+		    break;
+	    case 'CENTERRIGHT':
+		    $x=round(imagesx($this->img_original) - imagesx($this->img_watermark));
+		    $y=round((imagesy($this->img_original) / 2) - (imagesy($this->img_watermark) / 2));
+		    break;
+	    case 'BOTTOMLEFT':
+		    $x=0;
+		    $y=round(imagesy($this->img_original) - imagesy($this->img_watermark));
+		    break;
+	    case 'BOTTOMCENTER':
+		    $x=round((imagesx($this->img_original) / 2) - (imagesx($this->img_watermark) / 2));
+		    $y=round(imagesy($this->img_original) - imagesy($this->img_watermark));
+		    break;
+	    case 'BOTTOMRIGHT':
+		    $x=round(imagesx($this->img_original) - imagesx($this->img_watermark));
+		    $y=round(imagesy($this->img_original) - imagesy($this->img_watermark));
+		    break;
 	}
+    }
 
+    function MakeWatermark(){
+	if ($this->img_watermark && $this->img_original) {
+	    $x = $y = 0;
+	    $this->WatermarkPosition($x, $y);
+	    $this->copyMerge($this->img_original, $this->img_watermark, 
+		$x, $y, 
+		0,0, 
+		imagesx($this->img_watermark), imagesy($this->img_watermark), 
+		$this->transparent
+	    );
+	}
     }
 
 }
